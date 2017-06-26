@@ -1,12 +1,12 @@
 [package]
 name = "bintray"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Jean-Sébastien Pédron <jean-sebastien@rabbitmq.com>"]
 
 [dependencies]
 env_logger = "0.4"
 hyper = "0.10"
-hyper-rustls = "0.3"
+hyper-rustls = "0.6"
 log = "0.3"
 serde = "0.9"
 serde_derive = "0.9"
