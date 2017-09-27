@@ -441,6 +441,52 @@ impl Package {
         }
     }
 
+    pub fn delete(&self, client: &BintrayClient)
+        -> Result<Option<String>, BintrayError>
+    {
+        let mut url = client.get_base_url();
+        {
+            let mut path = url.path_segments_mut().unwrap();
+            path.extend(&["packages",
+                        &self.owner,
+                        &self.repository,
+                        &self.package]);
+        }
+
+        let mut resp = client.delete(url)
+            .send()?;
+
+        let mut body = String::new();
+        resp.read_to_string(&mut body)?;
+
+        match resp {
+            _ if resp.status == StatusCode::Ok => {
+                info!("DeletePackage({}): {}", self, body);
+
+                report_bintray_warning!(
+                    self, resp, body, "DeletePackage")
+            }
+            _ if resp.status == StatusCode::Unauthorized => {
+                report_bintray_error!(
+                    self, resp, body, "DeletePackage",
+                    io::ErrorKind::PermissionDenied,
+                    "Missing or refused authentication")
+            }
+            _ if resp.status == StatusCode::Forbidden => {
+                report_bintray_error!(
+                    self, resp, body, "DeletePackage",
+                    io::ErrorKind::PermissionDenied,
+                    "Requires admin privileges")
+            }
+            _ => {
+                report_bintray_error!(
+                    self, resp, body, "DeletePackage",
+                    io::ErrorKind::Other,
+                    "Unrecognized error")
+            }
+        }
+    }
+
     pub fn get_latest_version(&self, client: Option<&BintrayClient>)
         -> Option<Version>
     {
