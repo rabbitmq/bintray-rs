@@ -35,6 +35,9 @@ pub struct Version {
     pub ordinal: Option<u64>,
 
     #[serde(skip_serializing_if="Option::is_none")]
+    pub rating_count: Option<u64>,
+
+    #[serde(skip_serializing_if="Option::is_none")]
     pub vcs_tag: Option<String>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub github_release_notes_file: Option<String>,
@@ -65,11 +68,13 @@ impl Version {
             released: None,
             ordinal: None,
 
+            rating_count: None,
+
             vcs_tag: None,
             github_release_notes_file: None,
             github_use_tag_release_notes: None,
             attribute_names: None,
-            attributes: None
+            attributes: None,
         }
     }
 
@@ -112,6 +117,8 @@ impl Version {
                         if s.is_empty() { None } else {  Some(s) }
                     });
                 self.ordinal = queried.ordinal;
+
+                self.rating_count = queried.rating_count;
 
                 self.vcs_tag = queried.vcs_tag;
                 self.github_release_notes_file =
