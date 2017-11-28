@@ -4,6 +4,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Read};
+use version_compare;
 
 use client::{BintrayClient, BintrayError};
 use version::Version;
@@ -529,8 +530,14 @@ impl Package {
                     .collect::<Vec<Version>>()
             }
             &Some(ref oldest) => {
+                let parsed_oldest =
+                    version_compare::Version::from(oldest).unwrap();
                 self.versions.iter()
-                    .skip_while(|&version| version != oldest)
+                    .skip_while(|&version| {
+                        let parsed_version =
+                            version_compare::Version::from(&version).unwrap();
+                        parsed_version < parsed_oldest
+                    })
                     .map(filter)
                     .collect::<Vec<Version>>()
             }

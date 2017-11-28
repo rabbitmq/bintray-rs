@@ -11,6 +11,7 @@ extern crate hyper_rustls;
 #[macro_use] extern crate log;
 #[macro_use] extern crate serde_derive;
 extern crate serde_json;
+extern crate version_compare;
 
 #[macro_use] pub mod utils;
 
