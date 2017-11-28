@@ -10,5 +10,5 @@ API](https://bintray.com/docs/api/) and this Rust library exposes it.
 
     ```toml
     [dependencies]
-    bintray = "0.3"
+    bintray = "0.4"
     ```
