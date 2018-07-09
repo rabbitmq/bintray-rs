@@ -1,0 +1,55 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.pivotal.bintray-rs</groupId>
+  <artifactId>myapp</artifactId>
+  <packaging>jar</packaging>
+  <version>1.0</version>
+
+  <name>Sample Maven package</name>
+  <url>https://github.com/rabbitmq/bintray_rs</url>
+
+  <licenses>
+    <license>
+      <name>ASL 2.0</name>
+      <url>http://www.apache.org/licenses/LICENSE-2.0.html</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <email>info@rabbitmq.com</email>
+      <name>RabbitMQ team</name>
+      <organization>Pivotal Software, Inc.</organization>
+      <organizationUrl>https://www.rabbitmq.com</organizationUrl>
+    </developer>
+  </developers>
+
+  <scm>
+    <url>https://github.com/rabbitmq/bintray_rs</url>
+    <connection>scm:git:git://github.com/rabbitmq/bintray_rs.git</connection>
+    <developerConnection>scm:git:git@github.com:rabbitmq/bintray_rs.git</developerConnection>
+    <tag>master</tag>
+  </scm>
+
+  <organization>
+    <name>Pivotal Software, Inc.</name>
+    <url>http://www.rabbitmq.com</url>
+  </organization>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>3.8.1</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

@@ -1,79 +1,34 @@
-use hyper::status::StatusCode;
-use serde_json;
-use std::borrow::Borrow;
-use std::collections::HashMap;
+use chrono::{DateTime, Utc};
+use failure::Error;
+use reqwest::StatusCode;
+use std::cmp::Ordering;
 use std::fmt;
-use std::io::{self, Read};
-use version_compare;
+use version_compare::{CompOp, VersionCompare};
+use ::{Client, BintrayError, Version};
 
-use client::{BintrayClient, BintrayError};
-use version::Version;
-use content::Content;
-use utils;
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct Package {
-    pub owner: String,
-    #[serde(rename = "repo")]
-    pub repository: String,
-    #[serde(rename = "name")]
-    pub package: String,
+    subject: String,
+    repository: String,
+    package: String,
 
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub desc: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub labels: Option<Vec<String>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub created: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub updated: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub linked_to_repos: Option<Vec<String>>,
-    pub public_download_numbers: bool,
-    pub public_stats: bool,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub permissions: Option<Vec<String>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub maturity: Option<PackageMaturity>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub versions: Vec<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub latest_version: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub system_ids: Option<Vec<String>>,
+    desc: String,
+    labels: Vec<String>,
+    licenses: Vec<String>,
+    website_url: String,
+    vcs_url: String,
+    issue_tracker_url: String,
+    github_repo: String,
+    github_release_notes_file: String,
+    maturity: PackageMaturity,
+    created: Option<DateTime<Utc>>,
+    updated: Option<DateTime<Utc>>,
+    versions: Option<Vec<String>>,
 
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub licenses: Option<Vec<String>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub custom_licenses: Option<Vec<String>>,
-
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub rating: Option<u32>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub rating_count: Option<u64>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub followers_count: Option<u64>,
-
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub website_url: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub issue_tracker_url: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub vcs_url: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub github_repo: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub github_release_notes_file: Option<String>,
-
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub attribute_names: Option<Vec<String>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub attributes: Option<HashMap<String, String>>,
+    client: Client,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum PackageMaturity {
     Official,
     Stable,
@@ -84,581 +39,514 @@ pub enum PackageMaturity {
 }
 
 impl Package {
-    pub fn new(owner: &str, repository: &str, package: &str) -> Package {
+    pub fn new(client: &Client,
+               subject: &str,
+               repository: &str,
+               package: &str)
+        -> Self
+    {
         Package {
-            package: String::from(package),
+            subject: String::from(subject),
             repository: String::from(repository),
-            owner: String::from(owner),
+            package: String::from(package),
 
-            desc: None,
-            labels: None,
+            desc: String::new(),
+            labels: vec![],
+            licenses: vec![],
+            website_url: String::new(),
+            vcs_url: String::new(),
+            issue_tracker_url: String::new(),
+            github_repo: String::new(),
+            github_release_notes_file: String::new(),
+            maturity: PackageMaturity::Unset,
             created: None,
             updated: None,
-            linked_to_repos: None,
-            public_download_numbers: false,
-            public_stats: false,
-            permissions: None,
-            maturity: None,
-            versions: vec![],
-            latest_version: None,
-            system_ids: None,
+            versions: None,
 
-            licenses: None,
-            custom_licenses: None,
-
-            rating: None,
-            rating_count: None,
-            followers_count: None,
-
-            website_url: None,
-            issue_tracker_url: None,
-            vcs_url: None,
-            github_repo: None,
-            github_release_notes_file: None,
-
-            attribute_names: None,
-            attributes: None,
+            client: client.clone(),
         }
     }
 
-    pub fn set_licenses<T: Borrow<str>>(mut self, licenses: &[T]) -> Package {
-        let mut licenses = licenses.iter()
-            .map(|s| String::from(s.borrow()))
-            .collect::<Vec<_>>();
-        licenses.sort();
-
-        self.licenses = Some(licenses);
+    pub fn desc(mut self, desc: &str) -> Self
+    {
+        self.set_desc(desc);
         self
     }
 
-    pub fn set_vcs_url(mut self, vcs_url: &str) -> Package {
-        self.vcs_url = Some(String::from(vcs_url));
+    pub fn set_desc(&mut self, desc: &str) -> &mut Self
+    {
+        self.desc = String::from(desc);
         self
     }
 
-    pub fn get(&mut self, get_attribute_values: bool, client: &BintrayClient)
-        -> Result<(), BintrayError>
+    pub fn labels<T: AsRef<str>>(mut self, labels: &[T]) -> Self
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("packages");
-            path.push(&self.owner);
-            path.push(&self.repository);
-            path.push(&self.package);
-        }
-
-        if get_attribute_values {
-            url.query_pairs_mut().append_pair("attribute_values", "1");
-        }
-
-        let mut resp = client.get(url).send()?;
-
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
-
-        match resp {
-            _ if resp.status == StatusCode::Ok => {
-                info!("GetPackage({}): {}", self, body);
-
-                let queried: Package = serde_json::from_str(&body)?;
-
-                self.desc = queried.desc;
-                self.labels = queried.labels
-                    .map(|mut v| { v.sort(); v });
-                self.created = queried.created;
-                self.updated = queried.updated;
-                self.linked_to_repos = queried.linked_to_repos
-                    .map(|mut v| { v.sort(); v });
-                self.public_download_numbers =
-                    queried.public_download_numbers;
-                self.public_stats = queried.public_stats;
-                self.permissions = queried.permissions
-                    .map(|mut v| { v.sort(); v });
-                self.maturity = queried.maturity;
-                self.versions = queried.versions;
-                self.latest_version = queried.latest_version;
-                self.system_ids = queried.system_ids
-                    .map(|mut v| { v.sort(); v });
-
-                self.licenses = queried.licenses
-                    .map(|mut v| { v.sort(); v });
-                self.custom_licenses = queried.custom_licenses
-                    .map(|mut v| { v.sort(); v });
-
-                self.rating = queried.rating;
-                self.rating_count = queried.rating_count;
-                self.followers_count = queried.followers_count;
-
-                self.website_url = queried.website_url;
-                self.issue_tracker_url = queried.issue_tracker_url;
-                self.vcs_url = queried.vcs_url;
-                self.github_repo = queried.github_repo
-                    .and_then(|s| {
-                        if s.is_empty() { None } else {  Some(s) }
-                    });
-                self.github_release_notes_file =
-                    queried.github_release_notes_file
-                    .and_then(|s| {
-                        if s.is_empty() { None } else {  Some(s) }
-                    });
-
-                self.attribute_names = queried.attribute_names
-                    .map(|mut v| { v.sort(); v });
-                self.attributes = queried.attributes;
-
-                self.versions.reverse();
-
-                Ok(())
-            }
-            _ if resp.status == StatusCode::NotFound => {
-                report_bintray_error!(
-                    self, resp, body, "GetPackage",
-                    io::ErrorKind::NotFound,
-                    "Package not found", true)
-            }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "GetPackage",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "GetPackage",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
-            }
-        }
+        self.set_labels(labels);
+        self
     }
 
-    pub fn exists(&mut self, client: &BintrayClient)
-        -> Result<bool, BintrayError>
+    pub fn set_labels<T: AsRef<str>>(&mut self, labels: &[T]) -> &mut Self
     {
-        match self.get(false, client) {
-            Ok(()) => Ok(true),
-            Err(BintrayError::Io(ref e))
-                if e.kind() == io::ErrorKind::NotFound => {
-                    Ok(false)
-                }
-            Err(e) => Err(e),
-        }
+        let mut vec: Vec<String> = labels
+            .iter()
+            .map(|s| s.as_ref().to_owned())
+            .collect();
+        vec.sort();
+
+        self.labels = vec;
+        self
     }
 
-    pub fn create(&mut self, client: &BintrayClient)
-        -> Result<(), BintrayError>
+    pub fn licenses<T: AsRef<str>>(mut self, licenses: &[T]) -> Self
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("packages");
-            path.push(&self.owner);
-            path.push(&self.repository);
-        }
+        self.set_licenses(licenses);
+        self
+    }
+
+    pub fn set_licenses<T: AsRef<str>>(&mut self, licenses: &[T]) -> &mut Self
+    {
+        let mut vec: Vec<String> = licenses
+            .iter()
+            .map(|s| s.as_ref().to_owned())
+            .collect();
+        vec.sort();
+
+        self.licenses = vec;
+        self
+    }
+
+    pub fn website_url(mut self, website_url: &str) -> Self
+    {
+        self.set_website_url(website_url);
+        self
+    }
+
+    pub fn set_website_url(&mut self, website_url: &str) -> &mut Self
+    {
+        self.website_url = String::from(website_url);
+        self
+    }
+
+    pub fn vcs_url(mut self, vcs_url: &str) -> Self
+    {
+        self.set_vcs_url(vcs_url);
+        self
+    }
+
+    pub fn set_vcs_url(&mut self, vcs_url: &str) -> &mut Self
+    {
+        self.vcs_url = String::from(vcs_url);
+        self
+    }
+
+    pub fn issue_tracker_url(mut self, issue_tracker_url: &str) -> Self
+    {
+        self.set_issue_tracker_url(issue_tracker_url);
+        self
+    }
+
+    pub fn set_issue_tracker_url(&mut self, issue_tracker_url: &str)
+        -> &mut Self
+    {
+        self.issue_tracker_url = String::from(issue_tracker_url);
+        self
+    }
+
+    pub fn github_repo(mut self, github_repo: &str) -> Self
+    {
+        self.set_github_repo(github_repo);
+        self
+    }
+
+    pub fn set_github_repo(&mut self, github_repo: &str) -> &mut Self
+    {
+        self.github_repo = String::from(github_repo);
+        self
+    }
+
+    pub fn github_release_notes_file(mut self,
+                                     github_release_notes_file: &str)
+        -> Self
+    {
+        self.set_github_release_notes_file(github_release_notes_file);
+        self
+    }
+
+    pub fn set_github_release_notes_file(&mut self,
+                                         github_release_notes_file: &str)
+        -> &mut Self
+    {
+        self.github_release_notes_file =
+            String::from(github_release_notes_file);
+        self
+    }
+
+    pub fn maturity(mut self, maturity: &PackageMaturity) -> Self
+    {
+        self.set_maturity(maturity);
+        self
+    }
+
+    pub fn set_maturity(&mut self, maturity: &PackageMaturity) -> &mut Self
+    {
+        self.maturity = maturity.clone();
+        self
+    }
+
+    pub fn create(mut self) -> Result<Self, Error>
+    {
+        let url = self.client.api_url(
+            &format!("/packages/{}/{}",
+                     self.subject,
+                     self.repository))?;
 
         #[derive(Serialize)]
         struct CreatePackageReq {
             name: String,
-            #[serde(skip_serializing_if="Option::is_none")]
-            desc: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            labels: Option<Vec<String>>,
-            public_download_numbers: bool,
-            public_stats: bool,
-            #[serde(skip_serializing_if="Option::is_none")]
-            maturity: Option<PackageMaturity>,
 
-            #[serde(skip_serializing_if="Option::is_none")]
-            licenses: Option<Vec<String>>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            custom_licenses: Option<Vec<String>>,
+            desc: String,
+            labels: Vec<String>,
+            licenses: Vec<String>,
+            website_url: String,
+            vcs_url: String,
+            issue_tracker_url: String,
+            github_repo: String,
+            github_release_notes_file: String,
+            maturity: PackageMaturity
+        }
 
-            #[serde(skip_serializing_if="Option::is_none")]
-            website_url: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            issue_tracker_url: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            vcs_url: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            github_repo: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            github_release_notes_file: Option<String>,
-        };
-
-        let args = CreatePackageReq {
+        let req = CreatePackageReq {
             name: self.package.clone(),
+
             desc: self.desc.clone(),
             labels: self.labels.clone(),
-            public_download_numbers: self.public_download_numbers,
-            public_stats: self.public_stats,
-            maturity: self.maturity.clone(),
-
             licenses: self.licenses.clone(),
-            custom_licenses: self.custom_licenses.clone(),
-
             website_url: self.website_url.clone(),
-            issue_tracker_url: self.issue_tracker_url.clone(),
             vcs_url: self.vcs_url.clone(),
+            issue_tracker_url: self.issue_tracker_url.clone(),
             github_repo: self.github_repo.clone(),
             github_release_notes_file: self.github_release_notes_file.clone(),
+            maturity: self.maturity.clone(),
         };
 
-        let json = serde_json::to_string_pretty(&args)?;
-        info!(
-            "CreatePackage({}): Submitting the following properties:\n{}",
-            self, json);
-
-        let mut resp = client.post(url)
-            .body(&json)
+        let mut response = self.client
+            .post(url)
+            .json(&req)
             .send()?;
 
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
+        if response.status().is_success() {
+            #[derive(Deserialize)]
+            struct CreatePackageResp {
+                owner: String,
+                repo: String,
+                name: String,
 
-        match resp {
-            _ if resp.status == StatusCode::Created => {
-                info!("CreatePackage({}): {}", self, body);
+                desc: String,
+                labels: Vec<String>,
+                licenses: Vec<String>,
+                website_url: String,
+                vcs_url: String,
+                issue_tracker_url: String,
+                github_repo: String,
+                github_release_notes_file: String,
+                maturity: PackageMaturity,
+                created: String,
+                updated: String,
+            }
 
-                let created: Package = serde_json::from_str(&body)?;
-                self.created = created.created;
-                self.updated = created.updated;
-                // TODO: Assert that created == package. */
+            let mut resp: CreatePackageResp = response.json()?;
+            resp.labels.sort();
+            resp.licenses.sort();
 
-                Ok(())
+            debug_assert_eq!(self.subject, resp.owner);
+            debug_assert_eq!(self.repository, resp.repo);
+            debug_assert_eq!(self.package, resp.name);
+            debug_assert_eq!(self.desc, resp.desc);
+            debug_assert_eq!(self.labels, resp.labels);
+            debug_assert_eq!(self.licenses, resp.licenses);
+            debug_assert_eq!(self.website_url, resp.website_url);
+            debug_assert_eq!(self.vcs_url, resp.vcs_url);
+            debug_assert_eq!(self.issue_tracker_url, resp.issue_tracker_url);
+            debug_assert_eq!(self.github_repo, resp.github_repo);
+            debug_assert_eq!(self.github_release_notes_file,
+                             resp.github_release_notes_file);
+            debug_assert_eq!(self.maturity, resp.maturity);
+
+            self.created = resp.created.parse::<DateTime<Utc>>().ok();
+            self.updated = resp.updated.parse::<DateTime<Utc>>().ok();
+
+            Ok(self)
+        } else {
+            #[derive(Deserialize)]
+            struct CreatePackageError {
+                message: String,
             }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "CreatePackage",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ if resp.status == StatusCode::Forbidden => {
-                report_bintray_error!(
-                    self, resp, body, "CreatePackage",
-                    io::ErrorKind::PermissionDenied,
-                    "Requires admin privileges")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "CreatePackage",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
+
+            let resp: CreatePackageError = response.json()?;
+
+            throw!(BintrayError::BintrayApiError { message: resp.message })
+        }
+    }
+
+    pub fn exists(&self) -> Result<bool, Error>
+    {
+        let url = self.client.api_url(
+            &format!("/packages/{}/{}/{}",
+                     self.subject,
+                     self.repository,
+                     self.package))?;
+
+        let response = self.client
+            .head(url)
+            .send()?;
+
+        if response.status().is_success() {
+            Ok(true)
+        } else {
+            match response.status() {
+                StatusCode::Unauthorized |
+                StatusCode::NotFound => {
+                    Ok(false)
+                }
+                status => {
+                    throw!(BintrayError::BintrayApiError {
+                        message: format!("Unexpected status from Bintray: {}",
+                                         status)
+                    })
+                }
             }
         }
     }
 
-    pub fn update(&mut self, client: &BintrayClient)
-        -> Result<(), BintrayError>
+    pub fn get(mut self) -> Result<Self, Error>
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("packages");
-            path.push(&self.owner);
-            path.push(&self.repository);
-            path.push(&self.package);
+        let url = self.client.api_url(
+            &format!("/packages/{}/{}/{}",
+                     self.subject,
+                     self.repository,
+                     self.package))?;
+
+        let mut response = self.client
+            .get(url)
+            .send()?;
+
+        if response.status().is_success() {
+            #[derive(Deserialize)]
+            struct GetPackageResp {
+                owner: String,
+                repo: String,
+                name: String,
+
+                desc: String,
+                labels: Vec<String>,
+                licenses: Vec<String>,
+                website_url: String,
+                vcs_url: String,
+                issue_tracker_url: String,
+                github_repo: Option<String>,
+                github_release_notes_file: Option<String>,
+                maturity: PackageMaturity,
+                created: String,
+                updated: String,
+                versions: Vec<String>,
+            }
+
+            let mut resp: GetPackageResp = response.json()?;
+            resp.labels.sort();
+            resp.licenses.sort();
+            resp.versions.sort_by(|ref a, ref b| {
+                match VersionCompare::compare(a, b) {
+                    Ok(CompOp::Lt) => Ordering::Less,
+                    Ok(CompOp::Eq) => Ordering::Equal,
+                    Ok(CompOp::Gt) => Ordering::Greater,
+                    _              => Ordering::Less,
+                }
+            });
+
+            debug_assert_eq!(self.subject, resp.owner);
+            debug_assert_eq!(self.repository, resp.repo);
+            debug_assert_eq!(self.package, resp.name);
+
+            self.desc = resp.desc;
+            self.labels = resp.labels;
+            self.licenses = resp.licenses;
+            self.website_url = resp.website_url;
+            self.vcs_url = resp.vcs_url;
+            self.issue_tracker_url = resp.issue_tracker_url;
+            self.github_repo = resp.github_repo
+                .unwrap_or(String::new());
+            self.github_release_notes_file = resp.github_release_notes_file
+                .unwrap_or(String::new());
+            self.maturity = resp.maturity;
+            self.created = resp.created.parse::<DateTime<Utc>>().ok();
+            self.updated = resp.updated.parse::<DateTime<Utc>>().ok();
+            self.versions = Some(resp.versions);
+
+            trace!("{}:\n\
+                   - desc: \"{}\"\n\
+                   - labels: {:?}\n\
+                   - website_url: \"{}\"\n\
+                   - vcs_url: \"{}\"\n\
+                   - issue_tracker_url: \"{}\"\n\
+                   - github_repo: \"{}\"\n\
+                   - github_release_notes_file: \"{}\"\n\
+                   - maturity: {:?}\n\
+                   - created: {}\n\
+                   - updated: {}\n\
+                   ",
+                   self,
+                   self.desc,
+                   self.labels,
+                   self.website_url,
+                   self.vcs_url,
+                   self.issue_tracker_url,
+                   self.github_repo,
+                   self.github_release_notes_file,
+                   self.maturity,
+                   self.created
+                   .map_or(String::from("(unknown)"), |d| d.to_string()),
+                   self.updated
+                   .map_or(String::from("(unknown)"), |d| d.to_string()));
+
+            Ok(self)
+        } else {
+            #[derive(Deserialize)]
+            struct GetPackageError {
+                message: String,
+            }
+
+            let resp: GetPackageError = response.json()?;
+
+            throw!(BintrayError::BintrayApiError { message: resp.message })
         }
+    }
+
+    pub fn update(&mut self) -> Result<&Self, Error>
+    {
+        let url = self.client.api_url(
+            &format!("/packages/{}/{}/{}",
+                     self.subject,
+                     self.repository,
+                     self.package))?;
 
         #[derive(Serialize)]
         struct UpdatePackageReq {
-            #[serde(skip_serializing_if="Option::is_none")]
-            desc: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            labels: Option<Vec<String>>,
-            public_download_numbers: bool,
-            public_stats: bool,
-            #[serde(skip_serializing_if="Option::is_none")]
-            maturity: Option<PackageMaturity>,
+            desc: String,
+            labels: Vec<String>,
+            licenses: Vec<String>,
+            website_url: String,
+            vcs_url: String,
+            issue_tracker_url: String,
+            github_repo: String,
+            github_release_notes_file: String,
+            maturity: PackageMaturity,
+        }
 
-            #[serde(skip_serializing_if="Option::is_none")]
-            licenses: Option<Vec<String>>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            custom_licenses: Option<Vec<String>>,
-
-            #[serde(skip_serializing_if="Option::is_none")]
-            website_url: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            issue_tracker_url: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            vcs_url: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            github_repo: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            github_release_notes_file: Option<String>,
-        };
-
-        let args = UpdatePackageReq {
+        let req = UpdatePackageReq {
             desc: self.desc.clone(),
             labels: self.labels.clone(),
-            public_download_numbers: self.public_download_numbers,
-            public_stats: self.public_stats,
-            maturity: self.maturity.clone(),
-
             licenses: self.licenses.clone(),
-            custom_licenses: self.custom_licenses.clone(),
-
             website_url: self.website_url.clone(),
-            issue_tracker_url: self.issue_tracker_url.clone(),
             vcs_url: self.vcs_url.clone(),
+            issue_tracker_url: self.issue_tracker_url.clone(),
             github_repo: self.github_repo.clone(),
             github_release_notes_file: self.github_release_notes_file.clone(),
+            maturity: self.maturity.clone(),
         };
 
-        let json = serde_json::to_string_pretty(&args)?;
-        info!(
-            "UpdatePackage({}): Submitting the following properties:\n{}",
-            self, json);
-
-        let mut resp = client.patch(url)
-            .body(&json)
+        let mut response = self.client
+            .patch(url)
+            .json(&req)
             .send()?;
 
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
+        if response.status().is_success() {
+            /* Bintray doesn't return the new `updated` value. So clear
+             * it to be sure the caller doesn't assume the value is
+             * up-to-date. */
+            self.updated = None;
 
-        match resp {
-            _ if resp.status == StatusCode::Ok => {
-                info!("UpdatePackage({}): {}", self, body);
-                Ok(())
+            Ok(self)
+        } else {
+            #[derive(Deserialize)]
+            struct UpdatePackageError {
+                message: String,
             }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "UpdatePackage",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ if resp.status == StatusCode::Forbidden => {
-                report_bintray_error!(
-                    self, resp, body, "UpdatePackage",
-                    io::ErrorKind::PermissionDenied,
-                    "Requires admin privileges")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "UpdatePackage",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
-            }
+
+            let resp: UpdatePackageError = response.json()?;
+
+            throw!(BintrayError::BintrayApiError { message: resp.message })
         }
     }
 
-    pub fn delete(&self, client: &BintrayClient)
-        -> Result<Option<String>, BintrayError>
+    pub fn delete(&self) -> Result<(), Error>
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.extend(&["packages",
-                        &self.owner,
-                        &self.repository,
-                        &self.package]);
-        }
+        let url = self.client.api_url(
+            &format!("/packages/{}/{}/{}",
+                     self.subject,
+                     self.repository,
+                     self.package))?;
 
-        let mut resp = client.delete(url)
+        let mut response = self.client
+            .delete(url)
             .send()?;
 
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            #[derive(Deserialize)]
+            struct DeletePackageError {
+                message: String,
+            }
 
-        match resp {
-            _ if resp.status == StatusCode::Ok => {
-                info!("DeletePackage({}): {}", self, body);
+            let resp: DeletePackageError = response.json()?;
 
-                report_bintray_warning!(
-                    self, resp, body, "DeletePackage")
-            }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "DeletePackage",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ if resp.status == StatusCode::Forbidden => {
-                report_bintray_error!(
-                    self, resp, body, "DeletePackage",
-                    io::ErrorKind::PermissionDenied,
-                    "Requires admin privileges")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "DeletePackage",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
-            }
+            throw!(BintrayError::BintrayApiError { message: resp.message })
         }
     }
 
-    pub fn get_latest_version(&self, client: Option<&BintrayClient>)
-        -> Option<Version>
+    pub fn get_name(&self) -> &str               { &self.package }
+    pub fn get_repository(&self) -> &str         { &self.repository }
+    pub fn get_subject(&self) -> &str            { &self.subject }
+    pub fn get_desc(&self) -> &str               { &self.desc }
+    pub fn get_labels(&self) -> &Vec<String>     { &self.labels }
+    pub fn get_licenses(&self) -> &Vec<String>   { &self.licenses }
+    pub fn get_website_url(&self) -> &str        { &self.website_url }
+    pub fn get_vcs_url(&self) -> &str            { &self.vcs_url }
+    pub fn get_issue_tracker_url(&self) -> &str  { &self.issue_tracker_url }
+    pub fn get_github_repo(&self) -> &str        { &self.github_repo }
+    pub fn get_github_release_notes_file(&self) -> &str
     {
-        self.get_versions_starting_at(&self.latest_version, client).pop()
+        &self.github_release_notes_file
     }
+    pub fn get_maturity(&self) -> &PackageMaturity { &self.maturity }
+    pub fn get_created(&self) -> &Option<DateTime<Utc>> { &self.created }
+    pub fn get_updated(&self) -> &Option<DateTime<Utc>> { &self.updated }
 
-    pub fn get_versions(&self, client: Option<&BintrayClient>)
-        -> Vec<Version>
+    pub fn versions(&self) -> Result<Vec<String>, Error>
     {
-        self.get_versions_starting_at(&None, client)
-    }
-
-    pub fn get_versions_starting_at(&self,
-                                    oldest: &Option<String>,
-                                    client: Option<&BintrayClient>)
-        -> Vec<Version>
-    {
-        let filter = |version: &String| -> Version {
-            let mut version = Version::new(
-                &self.owner,
-                &self.repository,
-                &self.package,
-                &version);
-            match client {
-                Some(client) => {
-                    match version.get(false, client) {
-                        Ok(()) => { }
-                        Err(e) => error!("Failed to query version: {}", e),
-                    };
-                }
-                None => { }
-            }
-            version
-        };
-
-        match oldest {
-            &None => {
-                self.versions.iter()
-                    .map(filter)
-                    .collect::<Vec<Version>>()
-            }
-            &Some(ref oldest) => {
-                let parsed_oldest =
-                    version_compare::Version::from(oldest).unwrap();
-                self.versions.iter()
-                    .skip_while(|&version| {
-                        let parsed_version =
-                            version_compare::Version::from(&version).unwrap();
-                        parsed_version < parsed_oldest
-                    })
-                    .map(filter)
-                    .collect::<Vec<Version>>()
-            }
+        match self.versions {
+            Some(ref versions) => Ok(versions.clone()),
+            None               => throw!(BintrayError::CallGetFirst),
         }
     }
 
-    pub fn list_files(&self,
-                      version: Option<&str>,
-                      include_unpublished: bool,
-                      client: &BintrayClient)
-        -> Result<Vec<Content>, BintrayError>
+    pub fn version(&self, version_string: &str) -> Version
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("packages");
-            path.push(&self.owner);
-            path.push(&self.repository);
-            path.push(&self.package);
-            match version {
-                Some(version) => { path.extend(&["versions", version]); },
-                None          => { }
-            }
-            path.push("files");
-        }
-
-        if include_unpublished {
-            url.query_pairs_mut().append_pair("include_unpublished", "1");
-        }
-
-        #[derive(Deserialize)]
-        struct GetFilesResp {
-            owner: String,
-            #[serde(rename = "repo")]
-            repository: String,
-            package: String,
-            version: String,
-            //name: String,
-            path: String,
-            created: String,
-            size: usize,
-            sha1: String,
-        };
-
-        let mut resp = client.get(url).send()?;
-
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
-
-        match resp {
-            _ if resp.status == StatusCode::Ok => {
-                info!("GetFiles({}): {}", self, body);
-
-                let result: Vec<GetFilesResp> =
-                    serde_json::from_str(&body)?;
-
-                let files = result.into_iter()
-                    .map(|item| {
-                        let mut file = Content::new(
-                            &item.owner,
-                            &item.repository,
-                            &item.package,
-                            &item.version,
-                            &item.path);
-                        file.created = Some(item.created.clone());
-                        file.size = Some(item.size);
-                        file.sha1 = Some(item.sha1.clone());
-                        file
-                    })
-                    .collect();
-                Ok(files)
-            }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "GetFiles",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ if resp.status == StatusCode::Forbidden => {
-                report_bintray_error!(
-                    self, resp, body, "GetFiles",
-                    io::ErrorKind::PermissionDenied,
-                    "Requires admin privileges")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "GetFiles",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
-            }
-        }
+        Version::new(&self.client,
+                     &self.subject,
+                     &self.repository,
+                     &self.package,
+                     version_string)
     }
 }
 
 impl fmt::Display for Package {
     fn fmt (&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}/{}", self.owner, self.repository, self.package)
-    }
-}
-
-impl From<String> for PackageMaturity {
-    fn from(from: String) -> PackageMaturity {
-        match from.to_lowercase().trim() {
-            "official"     => PackageMaturity::Official,
-            "stable"       => PackageMaturity::Stable,
-            "development"  => PackageMaturity::Development,
-            "experimental" => PackageMaturity::Experimental,
-            _              => PackageMaturity::Unset,
-        }
-    }
-}
-
-impl fmt::Display for PackageMaturity {
-    fn fmt (&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let type_ = match self {
-            &PackageMaturity::Official => "Official",
-            &PackageMaturity::Stable => "Stable",
-            &PackageMaturity::Development => "Generic",
-            &PackageMaturity::Experimental => "Experimental",
-            &PackageMaturity::Unset => "None",
-        };
-        write!(f, "{}", type_)
+        write!(
+            f,
+            "bintray::Package({}:{}:{})",
+            self.subject,
+            self.repository,
+            self.package)
     }
 }

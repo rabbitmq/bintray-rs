@@ -1,0 +1,28 @@
+# vim:sw=2:et:
+
+language: rust
+sudo: false
+rust:
+  - stable
+  - beta
+  - nightly
+
+matrix:
+  allow_failures:
+    - rust: nightly
+  fast_finish: true
+
+notifications:
+  email:
+    recipients:
+      - alerts@rabbitmq.com
+      - jean-sebastien.pedron@dumbbell.fr
+    on_success: never
+    on_failure: always
+
+cache: cargo
+
+env:
+  global:
+    - secure: "gW1G7JoH4HPmD7KxaFriK3ZyW9WIkjJDr4v23gYi5RIq9t/eX/sMRi51KswlNDMteag2F+aTiRMLruu6YvmQe0EJjEBtpQrD/6IyEadzIrt9+JcSwqwR9cjcBbFynu6N8BDW4/Sv9DyH8GgIIGzCTFSfKd+OKMy5wuhMOQInV9gUL7YAQ1q7h/cFJl6D40q7I1iCj+ymL/ZYFvq0gORbd5xkwBym7R0iDy3z95d+OPyCfJjEOl270jR2q+rTkD/NQi4cJosYDuiQ4pTJ2ojHBrHyxL/xx3VY0Giy8gv03RYDS+zrHUKM4xOYneoM5pRhqD1++5oOVepr65WrHkl5lCBaXbhZRhNWNWPV+0C1dIz+V93IsUYcmHBO8xVvVDOREDaRSQ96pELYpLnAxNwpS9cavmZd46xseIN0Uikjj/ZK5oHnUH7N0wXuYwBnkXUA+4jJlIjAEQ69ZqgO6zm57DpiR6yadS+JJz/Z769zQcdNKx6HSAPff0czbjvZNLLt4lj7qy9oxt+KmjwlglIrmpEbmsdgy1DLZzu4V2yiUsThMucbOOhHUYsOO9cWml9MUzqi7xhuZAhrz/+gIsWmdKA93PoxkrP/p4HkbWI1bYBUZ5YEdtl9cTL+yCa3B0aacYjQOa08H7cMR6uCuRYO6cNyA6j1AZVXJGLMvB1ICxM="
+    - secure: "iy6cYTFR2aImYAqI3BaZYAn27qRGPKgZRYtuRqThYRiOlXHU2odcQ2ANrgC760E/BWK2RtVN6MG1aU2KUzEKQqIhXXxqpe6GFA61T0+Ie7qZL6lwED628T37wm5lO97NRFu3MSKQbibphlmcJnfaFbKZ4qLVTfru14fAPeGI7ltxfA7K7mykf/98GVs4PuPrhABaESmojabucG8zyPzUSajzTfZ987HLA2YGEZpECLy+T2yxwMyDFCDN22NCo8zmz/lhGFznrSze8/zQWHeyc0WQPDe8SbTWs7CDHX3HfTGKCj4OcXM2nUakRKHlAzBWWL7s2rhM7KwC8q/UrK5AU/Buty+rMnvHgcYtlO73wN1n6YWtOuIURUqHhZXb+LMC4hmXyZXjRExnLobu8nKdfVfuj5/XjRAPf7VRitXlqQxE2HMfRAN3jCVOWQyIa2yRxPN6sG5xeiPzM/YHeUesJ3GGgEIgjNHrzAjvCtrZoyU4o1MGOiunYqHG+yBsWbpNCTBnJAk+aIYkiQ+O2lxfoZTMYCztMEwn0fiaDZm5GbdGFlVlycdaPRsZut9HnKb6HHkmyskr18VYyShdeJApRhy7WdsspzOnMsCy7B1JQiFowPo2A5AsNzcAEYKTMkssKsjUa4Mt4ZB0RGHMrOTdiUqQdvG7zYerJ6X8gcnYFLg="

@@ -1,0 +1,5 @@
+#!/usr/bin/make -f
+# vim:ft=make:
+
+%:
+	dh $@ --parrallel

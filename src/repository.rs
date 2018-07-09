@@ -1,88 +1,40 @@
-//! Bintray repository
-//!
-//! The following operations are currently supported on a Bintray
-//! repository:
-//! * querying a repository;
-//! * creating a repository;
-//! * updating a repository.
-
-use hyper::status::StatusCode;
-use serde_json;
+use chrono::{DateTime, Utc};
+use failure::Error;
+use reqwest::StatusCode;
 use std::fmt;
-use std::io::{self, Read};
+use std::path::Path;
+use ::{Client, BintrayError, Package};
 
-use client::{BintrayClient, BintrayError};
-use utils;
+use std::iter::Map;
+use std::vec::IntoIter;
 
-/// Representation of a repository's attributes.
-///
-/// They are all the attributes reported by Bintray's API. Some of them
-/// can be updated.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct Repository {
-    /// The user or organization owning the repository.
-    pub owner: String,
-    /// the name of the repository.
-    #[serde(rename = "name")]
-    pub repository: String,
-    /// The type of the repository.
-    #[serde(rename = "type")]
-    pub type_: RepositoryType,
-    /// Flag to indicate if the account is premium.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub premium: bool,
-    /// The date and time when the repository was created.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub created: Option<String>,
-    /// The number of packages provided by this repository.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub package_count: u64,
+    subject: String,
+    repository: String,
+    type_: RepositoryType,
 
-    /// Flag to indicate if a repository is private.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub private: bool,
-    /// Name of the business unit associated with the repository.
-    ///
-    /// This allows you to monitor overall usage pers business unit.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub business_unit: Option<String>,
-    /// Description of this repository.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub desc: Option<String>,
-    /// List of labels attached to this repository.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub labels: Option<Vec<String>>,
-    /// Flag to indicate if repository metadata are automatically signed
-    /// with Bintray GPG key.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub gpg_sign_metadata: bool,
-    /// Flag to indeicate if repository files are automatically signed
-    /// with Bintray GPG key.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub gpg_sign_files: bool,
-    /// Flag to indicate if repository metadata and files are
-    /// automatically signed with the owner's GPG key.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub gpg_use_owner_key: bool,
+    /* Generic properties. */
+    private: bool,
+    premium: bool,
+    desc: String,
+    labels: Vec<String>,
+    created: Option<DateTime<Utc>>,
+    package_count: Option<u64>,
+    gpg_use_owner_key: bool,
+    gpg_sign_files: bool,
+    gpg_sign_metadata: bool,
 
-    /// Default Debian architecture to set on uploaded files.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub default_debian_architecture: Option<String>,
-    /// Default Debian distribution to set on uploaded files.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub default_debian_distribution: Option<String>,
-    /// Default Debian component to set on uploaded files.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub default_debian_component: Option<String>,
+    /* Debian-specific properties. */
+    default_debian_architecture: Option<String>,
+    default_debian_distribution: Option<String>,
+    default_debian_component: Option<String>,
 
-    /// Depth, relative to the repository root, at which YUM metadata is
-    /// created.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub yum_metadata_depth: Option<u64>,
-    /// Name of the file holding YUM groups data.
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub yum_groups_file: Option<String>,
+    /* RPM-specific properties. */
+    yum_metadata_depth: Option<usize>,
+    yum_groups_file: Option<String>,
+
+    client: Client,
 }
 
 /// Repository types supported by Bintray.
@@ -109,292 +61,260 @@ pub enum RepositoryType {
     /// Vagrant boxes repository.
     Vagrant,
 
-    /// Bintray API sometimes report Debian repository type as `deb` instead of `debian`.
+    /// Bintray API sometimes reports Debian repository type as `deb`
+    /// instead of `debian`.
     ///
-    /// The module tries to convert `Deb` to `Debian`.
-    // Looks like Bintray returns inconsistent types for Debian
-    // repository.
+    /// This module enforces then use of `Debian`, converting `Deb`
+    /// internally when Bintray API responds with it.
     Deb,
 }
 
+#[derive(Deserialize)]
+struct PackageNamesListEntry {
+    name: String,
+}
+
+impl RepositoryType {
+    pub fn is_indexed(&self) -> bool
+    {
+        match self {
+            &RepositoryType::Debian => true,
+            &RepositoryType::Rpm    => true,
+            _                       => false,
+        }
+    }
+
+    pub fn fixup(self) -> RepositoryType
+    {
+        match self {
+            RepositoryType::Deb => RepositoryType::Debian,
+            _                   => self,
+        }
+    }
+}
+
 impl Repository {
-    /// Instanciates a new `Repository` structure.
-    ///
-    /// The `Repository` type defaults to `Repository::Generic`.
-    pub fn new(owner: &str, repository: &str) -> Repository {
+    pub fn new(client: &Client,
+               subject: &str,
+               repository: &str)
+        -> Self
+    {
         Repository {
+            subject: String::from(subject),
             repository: String::from(repository),
-            owner: String::from(owner),
             type_: RepositoryType::Generic,
-            premium: false,
-            created: None,
-            package_count: 0,
 
+            /* Generic properties. */
             private: false,
-            business_unit: None,
-            desc: None,
-            labels: None,
-            gpg_sign_metadata: false,
-            gpg_sign_files: false,
+            premium: false,
+            desc: String::new(),
+            labels: vec![],
+            created: None,
+            package_count: None,
             gpg_use_owner_key: false,
+            gpg_sign_files: false,
+            gpg_sign_metadata: false,
 
+            /* Debian-specific properties. */
             default_debian_architecture: None,
             default_debian_distribution: None,
             default_debian_component: None,
 
+            /* RPM-specific properties. */
             yum_metadata_depth: None,
             yum_groups_file: None,
+
+            client: client.clone(),
         }
     }
 
-    /// Queries Bintray API and update `Repository` structure with the
-    /// returned attributes.
-    ///
-    /// # Examples
-    ///
-    /// Query an existing RPM repository:
-    ///
-    /// ```rust
-    /// use bintray::client::BintrayClient;
-    /// use bintray::repository::{Repository, RepositoryType};
-    /// # use std::env;
-    /// # let username = env::var("BINTRAY_USERNAME").ok();
-    /// # let api_key = env::var("BINTRAY_API_KEY").ok();
-    /// # let owner = env::var("BINTRAY_OWNER")
-    /// #     .unwrap_or(String::from("my-company"));
-    /// # let repository_name =
-    /// #     "t-bintray-crate-repository-1";
-    ///
-    /// // Initialize a Bintray client with a username and an API key.
-    /// // Those are `Option` because some operations can be performed
-    /// // anonymously.
-    /// let client = BintrayClient::new(username, api_key);
-    ///
-    /// # {
-    /// #   let mut repository = Repository::new(&owner, &repository_name);
-    /// #   repository.type_ = RepositoryType::Rpm;
-    /// #   assert!(repository.delete(&client).is_ok());
-    /// #   assert!(repository.create(&client).is_ok());
-    /// # }
-    /// // Create a `Repository` structure. At this time, the structure
-    /// // is empty: nothing was requested from Bintray yet. That's why
-    /// // the creation date is empty for instance.
-    /// let mut repository = Repository::new(&owner, &repository_name);
-    /// assert!(repository.created.is_none());
-    ///
-    /// // Query Bintray for informations about this repository. This
-    /// // time, the creation date is available. If the repository
-    /// // didn't exist, the call would have returned an error.
-    /// assert!(repository.get(&client).is_ok());
-    /// assert!(repository.created.is_some());
-    /// assert_eq!(repository.type_, RepositoryType::Rpm);
-    /// # assert!(repository.delete(&client).is_ok());
-    /// ```
-    pub fn get(&mut self, client: &BintrayClient)
-        -> Result<(), BintrayError>
+    pub fn repo_type(mut self, type_: &RepositoryType) -> Self
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("repos");
-            path.push(&self.owner);
-            path.push(&self.repository);
-        }
-
-        let mut resp = client.get(url).send()?;
-
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
-
-        match resp {
-            _ if resp.status == StatusCode::Ok => {
-                info!("GetRepository({}): {}", self, body);
-
-                let queried: Repository = serde_json::from_str(&body)?;
-
-                self.type_ = queried.type_;
-                self.premium = queried.premium;
-                self.created = queried.created;
-                self.package_count = queried.package_count;
-
-                self.private = queried.private;
-                self.business_unit = queried.business_unit;
-                self.desc = queried.desc;
-                self.labels = queried.labels
-                    .map(|mut v| { v.sort(); v });
-                self.gpg_sign_metadata = queried.gpg_sign_metadata;
-                self.gpg_sign_files = queried.gpg_sign_files;
-                self.gpg_use_owner_key = queried.gpg_use_owner_key;
-
-                self.default_debian_architecture =
-                    queried.default_debian_architecture;
-                self.default_debian_distribution =
-                    queried.default_debian_distribution;
-                self.default_debian_component =
-                    queried.default_debian_component;
-
-                self.yum_metadata_depth = queried.yum_metadata_depth;
-                self.yum_groups_file = queried.yum_groups_file;
-
-                if self.type_ == RepositoryType::Deb {
-                    self.type_ = RepositoryType::Debian;
-                }
-
-                Ok(())
-            }
-            _ if resp.status == StatusCode::NotFound => {
-                report_bintray_error!(
-                    self, resp, body, "GetRepository",
-                    io::ErrorKind::NotFound,
-                    "Repository not found", true)
-            }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "GetRepository",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "GetRepository",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
-            }
-        }
+        self.type_ = (*type_).clone().fixup();
+        self
     }
 
-    /// Same as `get()` but returns true if the repository exists, or
-    /// false if it doesn't.
-    ///
-    /// Only the "404 Not Found" error is accepted and false is
-    /// returned. Other errors are returned like `get()`.
-    ///
-    /// # Examples
-    ///
-    /// Create an RPM repository if it doesn't exist:
-    ///
-    /// ```rust
-    /// use bintray::client::BintrayClient;
-    /// use bintray::repository::{Repository, RepositoryType};
-    /// # use std::env;
-    /// # let username = env::var("BINTRAY_USERNAME").ok();
-    /// # let api_key = env::var("BINTRAY_API_KEY").ok();
-    /// # let owner = env::var("BINTRAY_OWNER")
-    /// #     .unwrap_or(String::from("my-company"));
-    /// # let repository_name =
-    /// #     "t-bintray-crate-repository-2";
-    ///
-    /// // Initialize a Bintray client with a username and an API key.
-    /// // Those are `Option` because some operations can be performed
-    /// // anonymously.
-    /// let client = BintrayClient::new(username, api_key);
-    ///
-    /// # {
-    /// #   let mut repository = Repository::new(&owner, &repository_name);
-    /// #   assert!(repository.delete(&client).is_ok());
-    /// # }
-    /// // Create a `Repository` structure. At this time, the structure
-    /// // is empty: nothing was requested from Bintray yet. That's why
-    /// // the creation date is empty for instance.
-    /// let mut repository = Repository::new(&owner, &repository_name);
-    ///
-    /// // Test if the repository exists, and create if it doesn't.
-    /// if !repository.exists(&client).unwrap() {
-    ///     repository.desc = Some(String::from("My RPM repository"));
-    ///     repository.type_ = RepositoryType::Rpm;
-    ///     assert!(repository.create(&client).is_ok());
-    /// }
-    ///
-    /// // We can query it again to double-check the type is correct.
-    /// assert!(repository.get(&client).is_ok());
-    /// assert!(repository.created.is_some());
-    /// assert_eq!(repository.type_, RepositoryType::Rpm);
-    /// # assert!(repository.delete(&client).is_ok());
-    /// ```
-    pub fn exists(&mut self, client: &BintrayClient)
-        -> Result<bool, BintrayError>
+    pub fn private(mut self, private: bool) -> Self
     {
-        match self.get(client) {
-            Ok(()) => Ok(true),
-            Err(BintrayError::Io(ref e))
-                if e.kind() == io::ErrorKind::NotFound => {
-                    Ok(false)
-                }
-            Err(e) => Err(e),
-        }
+        self.set_private(private);
+        self
     }
 
-    /// Creates the repository.
-    ///
-    /// The `Repository` structure members should be filled first. They
-    /// are then passed to the API as is. Fields set to `None` are not
-    /// submitted to the API, the remote value will be the default.
-    ///
-    /// # Examples
-    ///
-    /// Create a Debian repository:
-    ///
-    /// ```rust
-    /// use bintray::client::BintrayClient;
-    /// use bintray::repository::{Repository, RepositoryType};
-    /// # use std::env;
-    /// # let username = env::var("BINTRAY_USERNAME").ok();
-    /// # let api_key = env::var("BINTRAY_API_KEY").ok();
-    /// # let owner = env::var("BINTRAY_OWNER")
-    /// #     .unwrap_or(String::from("my-company"));
-    /// # let repository_name =
-    /// #     "t-bintray-crate-repository-3";
-    ///
-    /// // Initialize a Bintray client with a username and an API key.
-    /// // Those are `Option` because some operations can be performed
-    /// // anonymously.
-    /// let client = BintrayClient::new(username, api_key);
-    ///
-    /// # {
-    /// #   let mut repository = Repository::new(&owner, &repository_name);
-    /// #   assert!(repository.delete(&client).is_ok());
-    /// # }
-    /// // Create a `Repository` structure and initialize several
-    /// // fields. In particular the type is important, though it
-    /// // defaults to `RepositoryType::Generic`.
-    /// let mut repository = Repository::new(&owner, &repository_name);
-    /// repository.desc = Some(String::from("My RPM repository"));
-    /// repository.type_ = RepositoryType::Debian;
-    /// assert!(repository.create(&client).is_ok());
-    ///
-    /// // We can query it again to double-check the type is correct.
-    /// assert!(repository.get(&client).is_ok());
-    /// assert!(repository.created.is_some());
-    /// assert_eq!(repository.type_, RepositoryType::Debian);
-    /// # assert!(repository.delete(&client).is_ok());
-    /// ```
-    pub fn create(&mut self, client: &BintrayClient)
-        -> Result<(), BintrayError>
+    pub fn set_private(&mut self, private: bool) -> &mut Self
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("repos");
-            path.push(&self.owner);
-            path.push(&self.repository);
-        }
+        self.private = private;
+        self
+    }
+
+    pub fn desc(mut self, desc: &str) -> Self
+    {
+        self.set_desc(desc);
+        self
+    }
+
+    pub fn set_desc(&mut self, desc: &str) -> &mut Self
+    {
+        self.desc = String::from(desc);
+        self
+    }
+
+    pub fn labels<T: AsRef<str>>(mut self, labels: &[T]) -> Self
+    {
+        self.set_labels(labels);
+        self
+    }
+
+    pub fn set_labels<T: AsRef<str>>(&mut self, labels: &[T]) -> &mut Self
+    {
+        let mut vec: Vec<String> = labels
+            .iter()
+            .map(|s| s.as_ref().to_owned())
+            .collect();
+        vec.sort();
+
+        self.labels = vec;
+        self
+    }
+
+    pub fn gpg_use_owner_key(mut self, gpg_use_owner_key: bool) -> Self
+    {
+        self.set_gpg_use_owner_key(gpg_use_owner_key);
+        self
+    }
+
+    pub fn set_gpg_use_owner_key(&mut self, gpg_use_owner_key: bool)
+        -> &mut Self
+    {
+        self.gpg_use_owner_key = gpg_use_owner_key;
+        self
+    }
+
+    pub fn gpg_sign_files(mut self, gpg_sign_files: bool) -> Self
+    {
+        self.set_gpg_sign_files(gpg_sign_files);
+        self
+    }
+
+    pub fn set_gpg_sign_files(&mut self, gpg_sign_files: bool) -> &mut Self
+    {
+        self.gpg_sign_files = gpg_sign_files;
+        self
+    }
+
+    pub fn gpg_sign_metadata(mut self, gpg_sign_metadata: bool) -> Self
+    {
+        self.set_gpg_sign_metadata(gpg_sign_metadata);
+        self
+    }
+
+    pub fn set_gpg_sign_metadata(&mut self, gpg_sign_metadata: bool)
+        -> &mut Self
+    {
+        self.gpg_sign_metadata = gpg_sign_metadata;
+        self
+    }
+
+    pub fn default_debian_architecture(mut self,
+                                       default_debian_architecture: &str)
+        -> Self
+    {
+        self.set_default_debian_architecture(default_debian_architecture);
+        self
+    }
+
+    pub fn set_default_debian_architecture(&mut self,
+                                           default_debian_architecture: &str)
+        -> &mut Self
+    {
+        self.default_debian_architecture =
+            Some(String::from(default_debian_architecture));
+        self
+    }
+
+    pub fn default_debian_distribution(mut self,
+                                       default_debian_distribution: &str)
+        -> Self
+    {
+        self.set_default_debian_distribution(default_debian_distribution);
+        self
+    }
+
+    pub fn set_default_debian_distribution(&mut self,
+                                           default_debian_distribution: &str)
+        -> &mut Self
+    {
+        self.default_debian_distribution =
+            Some(String::from(default_debian_distribution));
+        self
+    }
+
+    pub fn default_debian_component(mut self,
+                                       default_debian_component: &str)
+        -> Self
+    {
+        self.set_default_debian_component(default_debian_component);
+        self
+    }
+
+    pub fn set_default_debian_component(&mut self,
+                                           default_debian_component: &str)
+        -> &mut Self
+    {
+        self.default_debian_component =
+            Some(String::from(default_debian_component));
+        self
+    }
+
+    pub fn yum_metadata_depth(mut self, yum_metadata_depth: usize) -> Self
+    {
+        self.set_yum_metadata_depth(yum_metadata_depth);
+        self
+    }
+
+    pub fn set_yum_metadata_depth(&mut self, yum_metadata_depth: usize)
+        -> &mut Self
+    {
+        self.yum_metadata_depth = Some(yum_metadata_depth);
+        self
+    }
+
+    pub fn yum_groups_file<P: AsRef<Path>>(mut self, yum_groups_file: P)
+        -> Self
+    {
+        self.set_yum_groups_file(yum_groups_file);
+        self
+    }
+
+    pub fn set_yum_groups_file<P: AsRef<Path>>(&mut self, yum_groups_file: P)
+        -> &mut Self
+    {
+        let path = Path::new(yum_groups_file.as_ref());
+        self.yum_groups_file = Some(path.to_string_lossy().into_owned());
+        self
+    }
+
+    pub fn create(mut self) -> Result<Self, Error>
+    {
+        let url = self.client.api_url(
+            &format!("/repos/{}/{}",
+                     self.subject,
+                     self.repository))?;
 
         #[derive(Serialize)]
         struct CreateRepositoryReq {
             name: String,
             #[serde(rename = "type")]
             type_: RepositoryType,
+
+            /* Generic properties. */
             private: bool,
-            #[serde(skip_serializing_if="Option::is_none")]
-            business_unit: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            desc: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            labels: Option<Vec<String>>,
+            desc: String,
+            labels: Vec<String>,
+            gpg_use_owner_key: bool,
             gpg_sign_metadata: bool,
             gpg_sign_files: bool,
-            gpg_use_owner_key: bool,
 
+            /* Debian-specific properties. */
             #[serde(skip_serializing_if="Option::is_none")]
             default_debian_architecture: Option<String>,
             #[serde(skip_serializing_if="Option::is_none")]
@@ -402,412 +322,401 @@ impl Repository {
             #[serde(skip_serializing_if="Option::is_none")]
             default_debian_component: Option<String>,
 
-            // RPM-specific properties.
+            /* RPM-specific properties. */
             #[serde(skip_serializing_if="Option::is_none")]
-            yum_metadata_depth: Option<u64>,
+            yum_metadata_depth: Option<usize>,
             #[serde(skip_serializing_if="Option::is_none")]
             yum_groups_file: Option<String>,
-        };
+        }
 
-        let args = CreateRepositoryReq {
+        let req = CreateRepositoryReq {
             name: self.repository.clone(),
             type_: self.type_.clone(),
 
             private: self.private,
-            business_unit: self.business_unit.clone(),
             desc: self.desc.clone(),
             labels: self.labels.clone(),
-            gpg_sign_metadata: self.gpg_sign_metadata,
-            gpg_sign_files: self.gpg_sign_files,
             gpg_use_owner_key: self.gpg_use_owner_key,
+            gpg_sign_metadata: self.gpg_sign_files,
+            gpg_sign_files: self.gpg_sign_metadata,
 
-            default_debian_architecture:
-                self.default_debian_architecture.clone(),
-            default_debian_distribution:
-                self.default_debian_distribution.clone(),
-            default_debian_component:
-                self.default_debian_component.clone(),
+            default_debian_architecture: self.default_debian_architecture.clone(),
+            default_debian_distribution: self.default_debian_distribution.clone(),
+            default_debian_component: self.default_debian_component.clone(),
 
-            yum_metadata_depth: self.yum_metadata_depth,
+            yum_metadata_depth: self.yum_metadata_depth.clone(),
             yum_groups_file: self.yum_groups_file.clone(),
         };
 
-        let json = serde_json::to_string_pretty(&args)?;
-        info!(
-            "CreateRepository({}): Submitting the following properties:\n{}",
-            self, json);
-
-        let mut resp = client.post(url)
-            .body(&json)
+        let mut response = self.client
+            .post(url)
+            .json(&req)
             .send()?;
 
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
+        if response.status().is_success() {
+            #[derive(Deserialize)]
+            struct CreateRepositoryResp {
+                owner: String,
+                name: String,
+                #[serde(rename = "type")]
+                type_: RepositoryType,
 
-        match resp {
-            _ if resp.status == StatusCode::Created => {
-                info!("CreateRepository({}): {}", self, body);
+                /* Generic properties. */
+                private: bool,
+                premium: bool,
+                desc: String,
+                labels: Vec<String>,
+                created: String,
+                package_count: u64,
+                gpg_use_owner_key: bool,
+                gpg_sign_files: bool,
+                gpg_sign_metadata: bool,
 
-                let created: Repository = serde_json::from_str(&body)?;
-                self.created = created.created;
-                // TODO: Assert that created == repo. */
+                /* Debian-specific properties. */
+                default_debian_architecture: Option<String>,
+                default_debian_distribution: Option<String>,
+                default_debian_component: Option<String>,
 
-                Ok(())
+                /* RPM-specific properties. */
+                yum_metadata_depth: Option<usize>,
+                yum_groups_file: Option<String>,
             }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "CreateRepository",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
+
+            let mut resp: CreateRepositoryResp = response.json()?;
+            resp.type_ = resp.type_.fixup();
+            resp.labels.sort();
+
+            debug_assert_eq!(self.subject, resp.owner);
+            debug_assert_eq!(self.repository, resp.name);
+            debug_assert_eq!(self.type_, resp.type_);
+            debug_assert_eq!(self.private, resp.private);
+            debug_assert_eq!(self.desc, resp.desc);
+            debug_assert_eq!(self.labels, resp.labels);
+            debug_assert_eq!(self.gpg_use_owner_key,
+                             resp.gpg_use_owner_key);
+            debug_assert_eq!(self.gpg_sign_files,
+                             resp.gpg_sign_files);
+            debug_assert_eq!(self.gpg_sign_metadata,
+                             resp.gpg_sign_metadata);
+            debug_assert_eq!(self.default_debian_architecture,
+                             resp.default_debian_architecture);
+            debug_assert_eq!(self.default_debian_distribution,
+                             resp.default_debian_distribution);
+            debug_assert_eq!(self.default_debian_component,
+                             resp.default_debian_component);
+            debug_assert_eq!(self.yum_metadata_depth, resp.yum_metadata_depth);
+            debug_assert_eq!(self.yum_groups_file, resp.yum_groups_file);
+
+            self.premium = resp.premium;
+            self.package_count = Some(resp.package_count);
+            self.created = resp.created.parse::<DateTime<Utc>>().ok();
+
+            Ok(self)
+        } else {
+            #[derive(Deserialize)]
+            struct CreateRepositoryError {
+                message: String,
             }
-            _ if resp.status == StatusCode::Forbidden => {
-                report_bintray_error!(
-                    self, resp, body, "CreateRepository",
-                    io::ErrorKind::PermissionDenied,
-                    "Requires admin privileges")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "CreateRepository",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
+
+            let resp: CreateRepositoryError = response.json()?;
+
+            throw!(BintrayError::BintrayApiError { message: resp.message })
+        }
+    }
+
+    pub fn exists(&self) -> Result<bool, Error>
+    {
+        let url = self.client.api_url(
+            &format!("/repos/{}/{}",
+                     self.subject,
+                     self.repository))?;
+
+        let response = self.client
+            .head(url)
+            .send()?;
+
+        if response.status().is_success() {
+            Ok(true)
+        } else {
+            match response.status() {
+                StatusCode::Unauthorized |
+                StatusCode::NotFound => {
+                    Ok(false)
+                }
+                status => {
+                    throw!(BintrayError::BintrayApiError {
+                        message: format!("Unexpected status from Bintray: {}",
+                                         status)
+                    })
+                }
             }
         }
     }
 
-    /// Updates the repository attributes.
-    ///
-    /// The `Repository` structure members should be filled first. They
-    /// are then passed to the API as is. Fields set to `None` are not
-    /// submitted to the API, the remote value will thus remain the
-    /// same.
-    ///
-    /// # Examples
-    ///
-    /// Set a description and the default distribution of a Debian
-    /// repository:
-    ///
-    /// ```rust
-    /// use bintray::client::BintrayClient;
-    /// use bintray::repository::{Repository, RepositoryType};
-    /// # use std::env;
-    /// # let username = env::var("BINTRAY_USERNAME").ok();
-    /// # let api_key = env::var("BINTRAY_API_KEY").ok();
-    /// # let owner = env::var("BINTRAY_OWNER")
-    /// #     .unwrap_or(String::from("my-company"));
-    /// # let repository_name =
-    /// #     "t-bintray-crate-repository-4";
-    ///
-    /// // Initialize a Bintray client with a username and an API key.
-    /// // Those are `Option` because some operations can be performed
-    /// // anonymously.
-    /// let client = BintrayClient::new(username, api_key);
-    ///
-    /// # {
-    /// #   let mut repository = Repository::new(&owner, &repository_name);
-    /// #   repository.type_ = RepositoryType::Debian;
-    /// #   assert!(repository.delete(&client).is_ok());
-    /// #   assert!(repository.create(&client).is_ok());
-    /// # }
-    /// let mut repository = Repository::new(&owner, &repository_name);
-    /// assert!(repository.get(&client).is_ok());
-    ///
-    /// // Set properties and update the repository.
-    /// repository.desc = Some(String::from("My repository"));
-    /// repository.default_debian_distribution = Some(String::from("jessie"));
-    /// assert!(repository.update(&client).is_ok());
-    /// # assert!(repository.delete(&client).is_ok());
-    /// ```
-    pub fn update(&self, client: &BintrayClient)
-        -> Result<(), BintrayError>
+    pub fn get(mut self) -> Result<Self, Error>
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("repos");
-            path.push(&self.owner);
-            path.push(&self.repository);
+        let url = self.client.api_url(
+            &format!("/repos/{}/{}",
+                     self.subject,
+                     self.repository))?;
+
+        let mut response = self.client
+            .get(url)
+            .send()?;
+
+        if response.status().is_success() {
+            #[derive(Deserialize)]
+            struct GetRepositoryResp {
+                owner: String,
+                name: String,
+                #[serde(rename = "type")]
+                type_: RepositoryType,
+
+                /* Generic properties. */
+                private: bool,
+                premium: bool,
+                desc: String,
+                labels: Vec<String>,
+                created: String,
+                package_count: u64,
+                gpg_use_owner_key: Option<bool>,
+                gpg_sign_files: Option<bool>,
+                gpg_sign_metadata: Option<bool>,
+
+                /* Debian-specific properties. */
+                default_debian_architecture: Option<String>,
+                default_debian_distribution: Option<String>,
+                default_debian_component: Option<String>,
+
+                /* RPM-specific properties. */
+                yum_metadata_depth: Option<usize>,
+                yum_groups_file: Option<String>,
+            }
+
+            let mut resp: GetRepositoryResp = response.json()?;
+            resp.type_ = resp.type_.fixup();
+            resp.labels.sort();
+
+            debug_assert_eq!(self.subject, resp.owner);
+            debug_assert_eq!(self.repository, resp.name);
+
+            self.type_ = resp.type_;
+            self.private = resp.private;
+            self.premium = resp.premium;
+            self.desc = resp.desc;
+            self.labels = resp.labels;
+            self.created = resp.created.parse::<DateTime<Utc>>().ok();
+            self.package_count = Some(resp.package_count);
+            self.gpg_use_owner_key = resp.gpg_use_owner_key.unwrap_or(false);
+            self.gpg_sign_files = resp.gpg_sign_files.unwrap_or(false);
+            self.gpg_sign_metadata = resp.gpg_sign_metadata.unwrap_or(false);
+
+            self.default_debian_architecture = resp.default_debian_architecture;
+            self.default_debian_distribution = resp.default_debian_distribution;
+            self.default_debian_component = resp.default_debian_component;
+
+            self.yum_metadata_depth = resp.yum_metadata_depth;
+            self.yum_groups_file = resp.yum_groups_file;
+
+            trace!("{}:\n\
+                   - private: {}\n\
+                   - premium: {}\n\
+                   - desc: \"{}\"\n\
+                   - labels: {:?}\n\
+                   - created: {}\n\
+                   - package_count: {}\n\
+                   ",
+                   self,
+                   self.private,
+                   self.premium,
+                   self.desc,
+                   self.labels,
+                   self.created
+                   .map_or(String::from("(unknown)"), |d| d.to_string()),
+                   self.package_count.unwrap_or(0));
+
+            Ok(self)
+        } else {
+            #[derive(Deserialize)]
+            struct GetRepositoryError {
+                message: String,
+            }
+
+            let resp: GetRepositoryError = response.json()?;
+
+            throw!(BintrayError::BintrayApiError { message: resp.message })
         }
+    }
+
+    pub fn update(&self) -> Result<&Self, Error>
+    {
+        let url = self.client.api_url(
+            &format!("/repos/{}/{}",
+                     self.subject,
+                     self.repository))?;
 
         #[derive(Serialize)]
         struct UpdateRepositoryReq {
-            #[serde(skip_serializing_if="Option::is_none")]
-            business_unit: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            desc: Option<String>,
-            #[serde(skip_serializing_if="Option::is_none")]
-            labels: Option<Vec<String>>,
+            desc: String,
+            labels: Vec<String>,
             gpg_sign_metadata: bool,
             gpg_sign_files: bool,
             gpg_use_owner_key: bool,
-        };
+        }
 
-        let args = UpdateRepositoryReq {
-            business_unit: self.business_unit.clone(),
+        let req = UpdateRepositoryReq {
             desc: self.desc.clone(),
             labels: self.labels.clone(),
-            gpg_sign_metadata: self.gpg_sign_metadata,
-            gpg_sign_files: self.gpg_sign_files,
             gpg_use_owner_key: self.gpg_use_owner_key,
+            gpg_sign_files: self.gpg_sign_files,
+            gpg_sign_metadata: self.gpg_sign_metadata,
         };
 
-        let json = serde_json::to_string_pretty(&args)?;
-        info!(
-            "UpdateRepository({}): Submitting the following properties:\n{}",
-            self, json);
-
-        let mut resp = client.patch(url)
-            .body(&json)
+        let mut response = self.client
+            .patch(url)
+            .json(&req)
             .send()?;
 
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
+        if response.status().is_success() {
+            Ok(self)
+        } else {
+            #[derive(Deserialize)]
+            struct UpdateRepositoryError {
+                message: String,
+            }
 
-        match resp {
-            _ if resp.status == StatusCode::Ok => {
-                info!("UpdateRepository({}): {}", self, body);
-                Ok(())
-            }
-            _ if resp.status == StatusCode::NotFound => {
-                report_bintray_error!(
-                    self, resp, body, "UpdateRepository",
-                    io::ErrorKind::NotFound,
-                    "Repository not found")
-            }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "UpdateRepository",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ if resp.status == StatusCode::Forbidden => {
-                report_bintray_error!(
-                    self, resp, body, "UpdateRepository",
-                    io::ErrorKind::PermissionDenied,
-                    "Requires admin privileges")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "UpdateRepository",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
-            }
+            let resp: UpdateRepositoryError = response.json()?;
+
+            throw!(BintrayError::BintrayApiError { message: resp.message })
         }
     }
 
-    /// Deletes a repository.
-    ///
-    /// The `Repository` structure members may be left uninitialized.
-    ///
-    /// # Examples
-    ///
-    /// Delete a repository:
-    ///
-    /// ```rust
-    /// use bintray::client::BintrayClient;
-    /// use bintray::repository::Repository;
-    /// # use std::env;
-    /// # let username = env::var("BINTRAY_USERNAME").ok();
-    /// # let api_key = env::var("BINTRAY_API_KEY").ok();
-    /// # let owner = env::var("BINTRAY_OWNER")
-    /// #     .unwrap_or(String::from("my-company"));
-    /// # let repository_name =
-    /// #     "t-bintray-crate-repository-5";
-    ///
-    /// // Initialize a Bintray client with a username and an API key.
-    /// // Those are `Option` because some operations can be performed
-    /// // anonymously.
-    /// let client = BintrayClient::new(username, api_key);
-    ///
-    /// # {
-    /// #   let mut repository = Repository::new(&owner, &repository_name);
-    /// #   assert!(repository.delete(&client).is_ok());
-    /// #   assert!(repository.create(&client).is_ok());
-    /// # }
-    /// // Initialize the `Repository` structure and delete the
-    /// // repository named `repository_name`.
-    /// let mut repository = Repository::new(&owner, &repository_name);
-    /// assert!(repository.delete(&client).is_ok());
-    ///
-    /// // We can double-check that the repository is gone.
-    /// assert!(!repository.exists(&client).unwrap());
-    /// ```
-    pub fn delete(&mut self, client: &BintrayClient)
-        -> Result<(), BintrayError>
+    pub fn delete(&self) -> Result<(), Error>
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("repos");
-            path.push(&self.owner);
-            path.push(&self.repository);
-        }
+        let url = self.client.api_url(
+            &format!("/repos/{}/{}",
+                     self.subject,
+                     self.repository))?;
 
-        let mut resp = client.delete(url)
+        let mut response = self.client
+            .delete(url)
             .send()?;
 
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
-
-        match resp {
-            _ if resp.status == StatusCode::Ok => {
-                info!("DeleteRepository({}): {}", self, body);
-
-                self.created = None;
-
-                Ok(())
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            #[derive(Deserialize)]
+            struct DeleteRepositoryError {
+                message: String,
             }
-            _ if resp.status == StatusCode::NotFound => {
-                info!("DeleteRepository({}): {}", self, body);
 
-                self.created = None;
+            let resp: DeleteRepositoryError = response.json()?;
 
-                Ok(())
-            }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "DeleteRepository",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ if resp.status == StatusCode::Forbidden => {
-                report_bintray_error!(
-                    self, resp, body, "DeleteRepository",
-                    io::ErrorKind::PermissionDenied,
-                    "Requires admin privileges")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "DeleteRepository",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
-            }
+            throw!(BintrayError::BintrayApiError { message: resp.message })
         }
     }
 
-    /// Return the list of packages provided by this repository.
-    ///
-    /// # Examples
-    ///
-    /// List packages provided by an RPM repository:
-    ///
-    /// ```rust
-    /// use bintray::client::BintrayClient;
-    /// use bintray::repository::{Repository, RepositoryType};
-    /// use bintray::package::Package;
-    /// # use std::env;
-    /// # let username = env::var("BINTRAY_USERNAME").ok();
-    /// # let api_key = env::var("BINTRAY_API_KEY").ok();
-    /// # let owner = env::var("BINTRAY_OWNER")
-    /// #     .unwrap_or(String::from("my-company"));
-    /// # let repository_name =
-    /// #     "t-bintray-crate-repository-6";
-    ///
-    /// // Initialize a Bintray client with a username and an API key.
-    /// // Those are `Option` because some operations can be performed
-    /// // anonymously.
-    /// let client = BintrayClient::new(username, api_key);
-    ///
-    /// # {
-    /// #   let mut repository = Repository::new(&owner, &repository_name);
-    /// #   repository.type_ = RepositoryType::Rpm;
-    /// #   assert!(repository.delete(&client).is_ok());
-    /// #   assert!(repository.create(&client).is_ok());
-    /// # }
-    /// let mut repository = Repository::new(&owner, &repository_name);
-    ///
-    /// // Create a package in this repository.
-    /// let mut package = Package::new(
-    ///     &repository.owner,
-    ///     &repository.repository,
-    ///     "my-package")
-    ///     .set_licenses(&["BSD 2-Clause"])
-    ///     .set_vcs_url("https://github.com/my-company/my-project.git");
-    /// assert!(package.create(&client).is_ok());
-    ///
-    /// // Get the list of packages for this repository.
-    /// let packages = repository.list_packages(&client).unwrap();
-    /// assert_eq!(packages.len(), 1);
-    /// # assert!(repository.delete(&client).is_ok());
-    /// ```
-    pub fn list_packages(&self, client: &BintrayClient)
-        -> Result<Vec<String>, BintrayError>
+    pub fn get_name(&self) -> &str            { &self.repository }
+    pub fn get_subject(&self) -> &str         { &self.subject }
+    pub fn get_type(&self) -> &RepositoryType { &self.type_ }
+    pub fn is_private(&self) -> bool          { self.private }
+    pub fn is_premium(&self) -> bool          { self.premium }
+    pub fn get_desc(&self) -> &str            { &self.desc }
+    pub fn get_labels(&self) -> &Vec<String>  { &self.labels }
+    pub fn get_gpg_use_owner_key(&self) -> bool { self.gpg_use_owner_key }
+    pub fn get_gpg_sign_files(&self) -> bool    { self.gpg_sign_files }
+    pub fn get_gpg_sign_metadata(&self) -> bool { self.gpg_sign_metadata }
+    pub fn get_created(&self) -> &Option<DateTime<Utc>> { &self.created }
+
+    pub fn get_default_debian_architecture(&self) -> &Option<String>
     {
-        let mut url = client.get_base_url();
-        {
-            let mut path = url.path_segments_mut().unwrap();
-            path.push("repos");
-            path.push(&self.owner);
-            path.push(&self.repository);
-            path.push("packages");
+        &self.default_debian_architecture
+    }
+
+    pub fn get_default_debian_distribution(&self) -> &Option<String>
+    {
+        &self.default_debian_distribution
+    }
+
+    pub fn get_default_debian_component(&self) -> &Option<String>
+    {
+        &self.default_debian_component
+    }
+
+    pub fn get_yum_metadata_depth(&self) -> &Option<usize>
+    {
+        &self.yum_metadata_depth
+    }
+
+    pub fn get_yum_groups_file(&self) -> &Option<String>
+    {
+        &self.yum_groups_file
+    }
+
+    fn package_names_iter(&self)
+        -> Result<Map<IntoIter<PackageNamesListEntry>,
+        fn(PackageNamesListEntry) -> String>, Error>
+    {
+        let url = self.client.api_url(
+            &format!("/repos/{}/{}/packages",
+                     self.subject,
+                     self.repository))?;
+
+        let mut response = self.client
+            .get(url)
+            .send()?;
+
+        if response.status().is_success() {
+            let package_entries: Vec<PackageNamesListEntry> = response.json()?;
+
+            fn extract_package_name(e: PackageNamesListEntry) -> String {
+                e.name
+            }
+            let extract_package_name: fn(PackageNamesListEntry) -> String =
+                extract_package_name;
+
+            let package_names_iter = package_entries
+                .into_iter()
+                .map(extract_package_name);
+            Ok(package_names_iter)
+        } else {
+            #[derive(Deserialize)]
+            struct ListPackageNamesError {
+                message: String,
+            }
+
+            let resp: ListPackageNamesError = response.json()?;
+
+            throw!(BintrayError::BintrayApiError { message: resp.message })
         }
+    }
 
-        #[derive(Deserialize)]
-        struct GetPackagesResp {
-            name: String,
-            // linked: bool,
-        };
+    pub fn package_names(&self) -> Result<Vec<String>, Error>
+    {
+        let mut package_names: Vec<String> = self
+            .package_names_iter()?
+            .collect();
+        package_names.sort();
 
-        let mut resp = client.get(url).send()?;
+        Ok(package_names)
+    }
 
-        let mut body = String::new();
-        resp.read_to_string(&mut body)?;
-
-        match resp {
-            _ if resp.status == StatusCode::Ok => {
-                info!("GetPackages({}): {}", self, body);
-
-                let result: Vec<GetPackagesResp> =
-                    serde_json::from_str(&body)?;
-
-                let packages: Vec<String> = result.into_iter()
-                    .map(|item| item.name)
-                    .collect();
-                Ok(packages)
-            }
-            _ if resp.status == StatusCode::NotFound => {
-                report_bintray_error!(
-                    self, resp, body, "GetPackages",
-                    io::ErrorKind::NotFound,
-                    "Repository not found")
-            }
-            _ if resp.status == StatusCode::Unauthorized => {
-                report_bintray_error!(
-                    self, resp, body, "GetPackages",
-                    io::ErrorKind::PermissionDenied,
-                    "Missing or refused authentication")
-            }
-            _ => {
-                report_bintray_error!(
-                    self, resp, body, "GetPackages",
-                    io::ErrorKind::Other,
-                    "Unrecognized error")
-            }
-        }
+    pub fn package(&self, package_name: &str) -> Package
+    {
+        Package::new(&self.client,
+                     &self.subject,
+                     &self.repository,
+                     package_name)
     }
 }
 
 impl fmt::Display for Repository {
     fn fmt (&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}<{}>", self.owner, self.repository, self.type_)
-    }
-}
-
-impl fmt::Display for RepositoryType {
-    fn fmt (&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let type_ = match self {
-            &RepositoryType::Debian => "Debian",
-            &RepositoryType::Docker => "Docker",
-            &RepositoryType::Generic => "Generic",
-            &RepositoryType::Maven => "Maven",
-            &RepositoryType::Npm => "npm",
-            &RepositoryType::Nuget => "NuGet",
-            &RepositoryType::Opkg => "opkg",
-            &RepositoryType::Rpm => "RPM",
-            &RepositoryType::Vagrant => "Vagrant",
-
-            &RepositoryType::Deb => "Deb",
-        };
-        write!(f, "{}", type_)
+        write!(
+            f,
+            "bintray::Repository({}:{} {:?})",
+            self.subject,
+            self.repository,
+            self.type_)
     }
 }

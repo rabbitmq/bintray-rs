@@ -1,0 +1,5 @@
+myapp (1.0-1) unstable; urgency=low
+
+  * Sample Debian package for the Bintray Rust crate testsuite.
+
+ -- RabbitMQ Team <info@rabbitmq.com>  Thu, 26 Jul 2018 16:32:43 +0000

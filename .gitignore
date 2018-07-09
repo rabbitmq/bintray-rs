@@ -1,4 +1,4 @@
-Cargo.lock
 .sw?
 .*.sw?
+Cargo.lock
 target
