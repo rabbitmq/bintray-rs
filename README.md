@@ -12,3 +12,11 @@ API](https://bintray.com/docs/api/) and this Rust library exposes it.
     [dependencies]
     bintray = "0.4"
     ```
+
+# License and Copyright
+
+(c) 2017-2022 VMware, Inc. or its affiliates.
+
+This package, the Rust Library for Bintray API, is licensed under the Mozilla Public License 2.0 ("MPL").
+
+See [LICENSE](./LICENSE).
